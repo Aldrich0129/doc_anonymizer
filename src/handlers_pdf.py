@@ -15,6 +15,7 @@ warnings.filterwarnings(
 import pdfplumber
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import black
+from reportlab.pdfbase import pdfmetrics
 
 # 使用绝对导入，避免在脚本直接运行时出现“attempted relative import”错误
 from anonymizer_core import anonymize_text
@@ -28,6 +29,15 @@ def _guess_font_name(fontname: str) -> str:
         return "Helvetica-Bold"
     if "ITALIC" in font_upper or "OBLIQUE" in font_upper:
         return "Helvetica-Oblique"
+    return "Helvetica"
+
+
+def _normalize_font(fontname: str) -> str:
+    """返回一个 reportlab 已注册的字体名称，避免绘制时报错。"""
+
+    guessed = _guess_font_name(fontname)
+    if guessed in pdfmetrics.getRegisteredFontNames():
+        return guessed
     return "Helvetica"
 
 
@@ -55,7 +65,8 @@ def pdf_to_xml(input_path: str) -> ET.Element:
             line_el = None
             for word in words:
                 rounded_top = round(word.get("top", 0), 1)
-                if current_top is None or abs(rounded_top - current_top) > 0.4:
+                tolerance = max(0.4, (word.get("size") or 10) * 0.15)
+                if current_top is None or abs(rounded_top - current_top) > tolerance:
                     line_el = ET.SubElement(page_el, "line", top=str(rounded_top))
                     current_top = rounded_top
 
@@ -107,22 +118,27 @@ def xml_to_pdf(xml_root: ET.Element, output_path: str):
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     buffer = BytesIO()
+    c = canvas.Canvas(buffer)
+    c.setFillColor(black)
+
     for page_el in xml_root.findall("page"):
         width = float(page_el.get("width", 595.2))
         height = float(page_el.get("height", 841.8))
-        c = canvas.Canvas(buffer, pagesize=(width, height))
-        c.setFillColor(black)
+        c.setPageSize((width, height))
 
         for line_el in page_el.findall("line"):
             for word_el in line_el.findall("word"):
                 x0 = float(word_el.get("x0", 40))
                 top = float(word_el.get("top", 40))
                 size = float(word_el.get("size", 10))
-                font = word_el.get("font", "Helvetica")
+                font = _normalize_font(word_el.get("font", "Helvetica"))
+                height_word = float(word_el.get("height", size))
 
-                y = height - top  # pdfplumber 的 top 从上到下，reportlab 原点在左下
+                # pdfplumber 的 top 以页面上边为 0；reportlab 原点在左下。
+                baseline_offset = height_word * 0.8 if height_word else 0
+                y = height - top - baseline_offset
                 c.setFont(font, size)
-                c.drawString(x0, y, (word_el.text or "")[:1000])
+                c.drawString(x0, y, (word_el.text or "")[:1000].replace("\n", " "))
 
         c.showPage()
 
