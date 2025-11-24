@@ -13,12 +13,55 @@ OUTPUT_DIR = Path("output")
 CONFIG_PATH = "config/rules.yaml"
 
 class AnonymizeHandler(FileSystemEventHandler):
+    def _wait_for_stable_file(self, path: Path, attempts: int = 6, delay: float = 0.5) -> bool:
+        """Esperar a que el archivo deje de crecer y esté accesible.
+
+        En Windows, los eventos de creación se disparan mientras la aplicación
+        origen sigue escribiendo, lo que provoca errores de "Package not found"
+        o "Permission denied" al intentar procesar el fichero de inmediato.
+        Este método observa el tamaño en disco y verifica que se puede abrir
+        el archivo antes de continuar.
+        """
+
+        for _ in range(attempts):
+            if not path.exists():
+                time.sleep(delay)
+                continue
+
+            try:
+                size_before = path.stat().st_size
+            except FileNotFoundError:
+                time.sleep(delay)
+                continue
+
+            time.sleep(delay)
+
+            try:
+                size_after = path.stat().st_size
+            except FileNotFoundError:
+                continue
+
+            if size_before == 0 or size_before != size_after:
+                continue
+
+            try:
+                with path.open("rb"):
+                    return True
+            except OSError:
+                time.sleep(delay)
+                continue
+
+        return False
     def on_created(self, event):
         if event.is_directory:
             return
         path = Path(event.src_path)
         ext = path.suffix.lower()
         print(f"检测到新文件: {path}")
+
+        if not self._wait_for_stable_file(path):
+            print(f"文件仍在写入中，稍后重试: {path}")
+            return
 
         rel_name = path.name
         output_path = OUTPUT_DIR / rel_name

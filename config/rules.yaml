@@ -3,6 +3,15 @@ global:
   default_placeholder: "XXX"
   keep_formatting: true
 
+knowledge_base:
+  customers:
+    - name: "KFC España"
+      aliases: ["Kentucky Fried Chicken", "KFC Spain"]
+      replacement: "ABC S.A."
+    - name: "Ayuntamiento de Barcelona"
+      aliases: ["Ajuntament de Barcelona"]
+      replacement: "Entidad Pública"
+
 # Reemplazos directos para nombres frecuentes
 exact_replacements:
   "KFC España": "ABC S.A."

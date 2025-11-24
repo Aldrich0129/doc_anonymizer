@@ -4,6 +4,8 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from rapidfuzz import fuzz
+
 def load_rules(config_path: str) -> Dict:
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -43,6 +45,27 @@ def apply_regex_replacements(text: str, regex_rules: List[Dict]) -> Tuple[str, L
 def anonymize_text(text: str, config_path: str) -> Tuple[str, List[Tuple[str, str]]]:
     rules = load_rules(config_path)
     logs: List[Tuple[str, str]] = []
+
+    # 0) 客户知识库：支持名称/别名替换，优先执行以覆盖后续规则
+    kb_customers = rules.get("knowledge_base", {}).get("customers", [])
+    for customer in kb_customers:
+        replacement = customer.get("replacement", "[CLIENTE]")
+        aliases = customer.get("aliases", [])
+        names = [customer.get("name", "")] + aliases
+        names = [n for n in names if n]
+
+        for candidate in names:
+            # 先尝试精确替换
+            if candidate in text:
+                text = text.replace(candidate, replacement)
+                logs.append((candidate, replacement))
+                continue
+
+            # 不满足精确匹配时尝试模糊匹配，避免误判设定较高阈值
+            score = fuzz.partial_ratio(candidate, text)
+            if score >= 90:
+                text = re.sub(re.escape(candidate), replacement, text, flags=re.IGNORECASE)
+                logs.append((candidate, replacement))
 
     # 1) 精确替换
     exact_map = rules.get("exact_replacements", {})
