@@ -3,6 +3,7 @@ from pathlib import Path
 from io import BytesIO
 import warnings
 import xml.etree.ElementTree as ET
+import shutil
 from cryptography.utils import CryptographyDeprecationWarning
 
 # 避免 pypdf 在导入时因弃用 ARC4 发出的噪声告警
@@ -13,10 +14,12 @@ warnings.filterwarnings(
 )
 
 import pdfplumber
+import pytesseract
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase._fontdata import standardFonts
+from reportlab.lib.utils import ImageReader
 
 # 使用绝对导入，避免在脚本直接运行时出现"attempted relative import"错误
 from anonymizer_core import anonymize_text
@@ -91,6 +94,109 @@ def _fit_text_to_width(text: str, font_name: str, font_size: float, max_width: f
         return text[:max(1, chars_that_fit - 3)] + "...", adjusted_size
 
     return text, adjusted_size
+
+
+def _is_tesseract_available() -> bool:
+    return shutil.which("tesseract") is not None
+
+
+def _ocr_page_to_words(image, dpi: int):
+    """使用 Tesseract OCR 将单页图像解析为带坐标的词列表。"""
+
+    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    scale = 72.0 / dpi  # 将像素转换为 PDF 点
+
+    words = []
+    for i, text in enumerate(data.get("text", [])):
+        if not text or text.isspace():
+            continue
+
+        conf = int(data.get("conf", ["0"])[i])
+        if conf < 0:  # 丢弃无效识别
+            continue
+
+        left = data["left"][i] * scale
+        top = data["top"][i] * scale
+        width = data["width"][i] * scale
+        height = data["height"][i] * scale
+
+        words.append(
+            {
+                "text": text,
+                "x0": left,
+                "x1": left + width,
+                "top": top,
+                "bottom": top + height,
+                "width": width,
+                "height": height,
+                "size": height,  # 近似字号
+                "fontname": "Helvetica",
+            }
+        )
+
+    return words
+
+
+def pdf_to_xml_with_ocr(input_path: str, dpi: int = 200):
+    """
+    将 PDF 转换为 XML，同时保留页面背景，便于在匿名化后还原排版。
+
+    - 使用 pdfplumber + pypdfium2 将页面渲染为高分辨率图像。
+    - 使用 Tesseract OCR 提取带位置信息的文字。
+    - 返回 XML 根节点和每页的背景图像列表。
+    """
+
+    if not _is_tesseract_available():
+        raise RuntimeError("Tesseract OCR 未安装，无法执行 OCR 流程")
+
+    root = ET.Element("document")
+    page_images = []
+
+    with pdfplumber.open(input_path) as pdf:
+        for page_index, page in enumerate(pdf.pages):
+            pil_image = page.to_image(resolution=dpi).original
+            page_images.append(pil_image)
+
+            width_px, height_px = pil_image.size
+            width_pt = width_px * 72.0 / dpi
+            height_pt = height_px * 72.0 / dpi
+
+            page_el = ET.SubElement(
+                root,
+                "page",
+                index=str(page_index),
+                width=str(width_pt),
+                height=str(height_pt),
+            )
+
+            ocr_words = _ocr_page_to_words(pil_image, dpi=dpi)
+            ocr_words.sort(key=lambda w: (round(w.get("top", 0), 1), w.get("x0", 0)))
+
+            current_top = None
+            line_el = None
+            for word in ocr_words:
+                rounded_top = round(word.get("top", 0), 1)
+                tolerance = 2.0
+
+                if current_top is None or abs(rounded_top - current_top) > tolerance:
+                    line_el = ET.SubElement(page_el, "line", top=str(rounded_top))
+                    current_top = rounded_top
+
+                ET.SubElement(
+                    line_el,
+                    "word",
+                    x0=str(word.get("x0", 0)),
+                    x1=str(word.get("x1", 0)),
+                    top=str(word.get("top", 0)),
+                    bottom=str(word.get("bottom", 0)),
+                    width=str(word.get("width", 0)),
+                    height=str(word.get("height", 0)),
+                    font=_guess_font_name(word.get("fontname", "")),
+                    size=str(word.get("size", 10)),
+                    upright="True",
+                ).text = word.get("text", "")
+
+    return root, page_images
 
 
 def pdf_to_xml(input_path: str) -> ET.Element:
@@ -201,7 +307,7 @@ def anonymize_xml(xml_root: ET.Element, config_path: str) -> ET.Element:
     return xml_root
 
 
-def xml_to_pdf(xml_root: ET.Element, output_path: str):
+def xml_to_pdf(xml_root: ET.Element, output_path: str, backgrounds=None):
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -209,10 +315,14 @@ def xml_to_pdf(xml_root: ET.Element, output_path: str):
     c = canvas.Canvas(buffer)
     c.setFillColor(black)
 
-    for page_el in xml_root.findall("page"):
+    for page_index, page_el in enumerate(xml_root.findall("page")):
         width = float(page_el.get("width", 595.2))
         height = float(page_el.get("height", 841.8))
         c.setPageSize((width, height))
+
+        if backgrounds and page_index < len(backgrounds):
+            bg_image = ImageReader(backgrounds[page_index])
+            c.drawImage(bg_image, 0, 0, width=width, height=height)
 
         for line_el in page_el.findall("line"):
             for word_el in line_el.findall("word"):
@@ -259,7 +369,21 @@ def xml_to_pdf(xml_root: ET.Element, output_path: str):
         f.write(buffer.getvalue())
 
 
-def anonymize_pdf(input_path: str, output_path: str, config_path: str):
-    xml_root = pdf_to_xml(input_path)
+def anonymize_pdf(input_path: str, output_path: str, config_path: str, use_ocr: bool = False):
+    """匿名化 PDF，可选择使用 OCR 流程以保留原始排版。"""
+
+    if use_ocr:
+        try:
+            xml_root, backgrounds = pdf_to_xml_with_ocr(input_path)
+        except Exception as exc:
+            warnings.warn(
+                f"OCR 流程不可用，回退到常规解析。原因: {exc}", RuntimeWarning
+            )
+            xml_root = pdf_to_xml(input_path)
+            backgrounds = None
+    else:
+        xml_root = pdf_to_xml(input_path)
+        backgrounds = None
+
     anonymized_xml = anonymize_xml(xml_root, config_path)
-    xml_to_pdf(anonymized_xml, output_path)
+    xml_to_pdf(anonymized_xml, output_path, backgrounds=backgrounds)
