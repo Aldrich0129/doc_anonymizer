@@ -1,11 +1,22 @@
 # src/handlers_pdf.py
 from pathlib import Path
 from io import BytesIO
+import warnings
+from cryptography.utils import CryptographyDeprecationWarning
+
+# 避免 pypdf 在导入时因弃用 ARC4 发出的噪声告警
+warnings.filterwarnings(
+    "ignore",
+    category=CryptographyDeprecationWarning,
+    module="pypdf\\._crypt_providers\\._cryptography",
+)
+
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
-from .anonymizer_core import anonymize_text
+# 使用绝对导入，避免在脚本直接运行时出现“attempted relative import”错误
+from anonymizer_core import anonymize_text
 
 def extract_pdf_text(input_path: str) -> str:
     reader = PdfReader(input_path)
