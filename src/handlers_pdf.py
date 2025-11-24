@@ -14,7 +14,10 @@ warnings.filterwarnings(
 )
 
 import pdfplumber
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
@@ -369,9 +372,29 @@ def xml_to_pdf(xml_root: ET.Element, output_path: str, backgrounds=None):
         f.write(buffer.getvalue())
 
 
-def anonymize_pdf(input_path: str, output_path: str, config_path: str, use_ocr: bool = False):
-    """匿名化 PDF，可选择使用 OCR 流程以保留原始排版。"""
+def anonymize_pdf(input_path: str, output_path: str, config_path: str, use_ocr: bool = False, use_word_pipeline: bool = True):
+    """
+    匿名化 PDF。
 
+    Args:
+        input_path: 输入 PDF 文件路径
+        output_path: 输出 PDF 文件路径
+        config_path: 脱敏配置文件路径
+        use_ocr: 是否使用 OCR 流程（仅在 use_word_pipeline=False 时有效）
+        use_word_pipeline: 是否使用 PDF->Word->PDF 流程（推荐，格式保留更好）
+    """
+
+    # 优先使用 PyMuPDF 流程，格式保留更完整且更可靠
+    if use_word_pipeline:
+        try:
+            anonymize_pdf_via_pymupdf(input_path, output_path, config_path)
+            return
+        except Exception as exc:
+            warnings.warn(
+                f"PyMuPDF 流程不可用，回退到常规解析。原因: {exc}", RuntimeWarning
+            )
+
+    # 回退到原有的 XML 流程
     if use_ocr:
         try:
             xml_root, backgrounds = pdf_to_xml_with_ocr(input_path)
@@ -387,3 +410,295 @@ def anonymize_pdf(input_path: str, output_path: str, config_path: str, use_ocr: 
 
     anonymized_xml = anonymize_xml(xml_root, config_path)
     xml_to_pdf(anonymized_xml, output_path, backgrounds=backgrounds)
+
+
+# ============================================================================
+# 新的 PDF -> Word -> PDF 流程（保留完整格式）
+# ============================================================================
+
+def pdf_to_word(pdf_path: str, docx_path: str):
+    """
+    使用 pdf2docx 将 PDF 转换为 Word，保留完整的格式和排版。
+
+    Args:
+        pdf_path: 输入 PDF 文件路径
+        docx_path: 输出 Word 文件路径
+    """
+    from pdf2docx import Converter
+
+    try:
+        cv = Converter(pdf_path)
+        cv.convert(docx_path, start=0, end=None)
+        cv.close()
+    except Exception as e:
+        raise RuntimeError(f"PDF 转 Word 失败: {e}")
+
+
+def anonymize_word_document(docx_path: str, output_path: str, config_path: str):
+    """
+    对 Word 文档进行脱敏处理，保留完整的格式和样式。
+
+    Args:
+        docx_path: 输入 Word 文件路径
+        output_path: 输出 Word 文件路径
+        config_path: 脱敏配置文件路径
+    """
+    from docx import Document
+
+    try:
+        doc = Document(docx_path)
+
+        # 处理段落中的文本
+        for paragraph in doc.paragraphs:
+            if paragraph.text.strip():
+                # 对段落文本进行脱敏
+                anonymized_text, _ = anonymize_text(paragraph.text, config_path)
+
+                # 保留格式的文本替换
+                _replace_paragraph_text(paragraph, anonymized_text)
+
+        # 处理表格中的文本
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if paragraph.text.strip():
+                            anonymized_text, _ = anonymize_text(paragraph.text, config_path)
+                            _replace_paragraph_text(paragraph, anonymized_text)
+
+        # 处理文本框和形状中的文本（如果有）
+        for shape in doc.inline_shapes:
+            if hasattr(shape, 'text_frame'):
+                for paragraph in shape.text_frame.paragraphs:
+                    if paragraph.text.strip():
+                        anonymized_text, _ = anonymize_text(paragraph.text, config_path)
+                        _replace_paragraph_text(paragraph, anonymized_text)
+
+        # 保存修改后的文档
+        doc.save(output_path)
+
+    except Exception as e:
+        raise RuntimeError(f"Word 文档脱敏失败: {e}")
+
+
+def _replace_paragraph_text(paragraph, new_text):
+    """
+    替换段落文本，同时保留格式（字体、大小、颜色等）。
+
+    Args:
+        paragraph: python-docx 段落对象
+        new_text: 新的文本内容
+    """
+    # 清空段落内容但保留格式
+    if len(paragraph.runs) > 0:
+        # 保留第一个 run 的格式
+        first_run = paragraph.runs[0]
+        # 清空所有 runs
+        for _ in range(len(paragraph.runs)):
+            paragraph._element.remove(paragraph.runs[0]._element)
+        # 添加新文本，使用第一个 run 的格式
+        new_run = paragraph.add_run(new_text)
+        # 复制格式
+        if first_run.font:
+            new_run.font.name = first_run.font.name
+            new_run.font.size = first_run.font.size
+            new_run.font.bold = first_run.font.bold
+            new_run.font.italic = first_run.font.italic
+            new_run.font.underline = first_run.font.underline
+            new_run.font.color.rgb = first_run.font.color.rgb if first_run.font.color.rgb else None
+    else:
+        # 如果没有 runs，直接添加文本
+        paragraph.add_run(new_text)
+
+
+def word_to_pdf(docx_path: str, pdf_path: str):
+    """
+    使用 LibreOffice 将 Word 文档转换为 PDF，保留完整格式。
+
+    Args:
+        docx_path: 输入 Word 文件路径
+        pdf_path: 输出 PDF 文件路径
+    """
+    import subprocess
+    from pathlib import Path
+    import os
+
+    try:
+        docx_path_obj = Path(docx_path).resolve()
+        pdf_path_obj = Path(pdf_path).resolve()
+
+        # 确保输出目录存在
+        pdf_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        # LibreOffice 会在与输入文件相同的目录或指定的输出目录中生成 PDF
+        # 我们使用临时目录作为输出目录
+        temp_output_dir = docx_path_obj.parent
+
+        # 使用 LibreOffice 命令行转换
+        # --headless: 无界面模式
+        # --convert-to pdf: 转换为 PDF
+        # --outdir: 输出目录
+        cmd = [
+            "libreoffice",
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(temp_output_dir),
+            str(docx_path_obj),
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice 转换失败:\nstdout: {result.stdout}\nstderr: {result.stderr}")
+
+        # LibreOffice 会生成与输入文件同名的 PDF（但扩展名为 .pdf）
+        expected_output = temp_output_dir / (docx_path_obj.stem + ".pdf")
+
+        if not expected_output.exists():
+            # 列出目录中的所有文件以便调试
+            import os
+            files_in_dir = list(os.listdir(temp_output_dir))
+            raise RuntimeError(
+                f"转换后的 PDF 文件未生成: {expected_output}\n"
+                f"目录中的文件: {files_in_dir}\n"
+                f"LibreOffice stdout: {result.stdout}\n"
+                f"LibreOffice stderr: {result.stderr}"
+            )
+
+        # 移动到目标位置
+        if expected_output != pdf_path_obj:
+            import shutil
+            shutil.move(str(expected_output), str(pdf_path_obj))
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Word 转 PDF 超时")
+    except Exception as e:
+        raise RuntimeError(f"Word 转 PDF 失败: {e}")
+
+
+def anonymize_pdf_via_pymupdf(input_path: str, output_path: str, config_path: str):
+    """
+    使用 PyMuPDF 直接在 PDF 上进行文本替换，完整保留原始格式。
+
+    这种方法比 PDF->Word->PDF 更可靠，且完全保留原始 PDF 的所有格式、字体和布局。
+
+    Args:
+        input_path: 输入 PDF 文件路径
+        output_path: 输出 PDF 文件路径
+        config_path: 脱敏配置文件路径
+    """
+    import fitz  # PyMuPDF
+    from pathlib import Path
+
+    try:
+        # 打开 PDF 文档
+        doc = fitz.open(input_path)
+
+        # 遍历每一页
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+
+            # 获取页面上的所有文本块
+            text_dict = page.get_text("dict")
+            blocks = text_dict.get("blocks", [])
+
+            for block in blocks:
+                if block.get("type") == 0:  # 文本块
+                    for line in block.get("lines", []):
+                        # 构建行文本
+                        line_text = "".join([span.get("text", "") for span in line.get("spans", [])])
+
+                        if not line_text.strip():
+                            continue
+
+                        # 对文本进行脱敏
+                        anonymized_text, replacements = anonymize_text(line_text, config_path)
+
+                        # 如果文本发生了变化，进行替换
+                        if anonymized_text != line_text and replacements:
+                            for original, replacement in replacements:
+                                if original and original in line_text:
+                                    # 使用 PyMuPDF 的 redact 功能进行替换
+                                    # 首先查找要替换的文本
+                                    areas = page.search_for(original)
+
+                                    for rect in areas:
+                                        # 获取该区域的文本属性
+                                        # 我们将用白色矩形覆盖原文本，然后写入新文本
+                                        page.add_redact_annot(rect, fill=(1, 1, 1))  # 白色填充
+
+                                    # 应用编辑
+                                    page.apply_redactions()
+
+                                    # 在相同位置写入新文本
+                                    for rect in areas:
+                                        # 获取原始文本的字体和大小
+                                        # 使用第一个span的属性作为参考
+                                        span = line.get("spans", [{}])[0]
+                                        font_size = span.get("size", 12)
+                                        font_color = span.get("color", 0)  # 黑色
+
+                                        # 写入新文本
+                                        page.insert_text(
+                                            (rect.x0, rect.y1 - 2),  # 位置稍微调整
+                                            replacement,
+                                            fontsize=font_size,
+                                            color=_int_to_rgb(font_color) if font_color else (0, 0, 0),
+                                        )
+
+        # 保存修改后的 PDF
+        doc.save(output_path)
+        doc.close()
+
+    except Exception as e:
+        raise RuntimeError(f"PDF 脱敏失败: {e}")
+
+
+def _int_to_rgb(color_int):
+    """将整数颜色转换为 RGB 元组"""
+    if color_int == 0:
+        return (0, 0, 0)  # 黑色
+    r = (color_int >> 16) & 0xFF
+    g = (color_int >> 8) & 0xFF
+    b = color_int & 0xFF
+    return (r / 255.0, g / 255.0, b / 255.0)
+
+
+def anonymize_pdf_via_word(input_path: str, output_path: str, config_path: str):
+    """
+    通过 PDF -> Word -> 脱敏 -> PDF 的流程处理 PDF，完整保留格式。
+
+    注意：在某些环境中，LibreOffice 可能无法工作，建议使用 anonymize_pdf_via_pymupdf 替代。
+
+    Args:
+        input_path: 输入 PDF 文件路径
+        output_path: 输出 PDF 文件路径
+        config_path: 脱敏配置文件路径
+    """
+    import tempfile
+    from pathlib import Path
+
+    try:
+        # 创建临时目录
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_docx = Path(temp_dir) / "temp.docx"
+            temp_anonymized_docx = Path(temp_dir) / "temp_anonymized.docx"
+
+            # 步骤 1: PDF -> Word
+            pdf_to_word(input_path, str(temp_docx))
+
+            # 步骤 2: Word 脱敏
+            anonymize_word_document(str(temp_docx), str(temp_anonymized_docx), config_path)
+
+            # 步骤 3: Word -> PDF
+            word_to_pdf(str(temp_anonymized_docx), output_path)
+
+    except Exception as e:
+        raise RuntimeError(f"PDF 脱敏流程失败: {e}")

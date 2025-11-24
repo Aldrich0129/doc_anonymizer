@@ -8,3 +8,16 @@ __pycache__/
 .env
 venv/
 test_output/
+
+# Testing and debugging files
+debug_*.py
+test_multiple_files.py
+test_word_pipeline.py
+
+# Temporary output files
+Example/*_pymupdf.pdf
+Example/*_pymupdf_test.pdf
+Example/*_word_pipeline.pdf
+Example/*_test.pdf
+Example/temp_*.docx
+Example/temp_*.pdf
