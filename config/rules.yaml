@@ -1,0 +1,58 @@
+global:
+  locale: "es_ES"
+  default_placeholder: "XXX"
+  # 当没有指定 replacement 时，统一用这个占位
+  keep_formatting: true
+
+entities:
+  # === 客户/机构名称 ===
+  - name: client_name
+    type: text
+    category: company
+    enabled: true
+    patterns:
+      - "KFC España"
+      - "Kentucky Fried Chicken"
+      - "Ayuntamiento de Barcelona"
+      - "Generalitat de Catalunya"
+      - "Ministerio de Hacienda"
+    replacement: "ABC S.A."
+
+  # === NIF / CIF / DNI / NIE ===
+  - name: tax_id
+    type: regex
+    category: id_number
+    enabled: true
+    # 非严格版本，足够测试用；后续你可以收紧规则
+    patterns:
+      - "\\b[ABCDEFGHJPQRSUVW]\\d{8}\\b"        # CIF
+      - "\\b\\d{8}[A-Z]\\b"                    # DNI
+      - "\\b[XYZ]\\d{7}[A-Z]\\b"               # NIE
+    replacement: "C12345678Z"
+
+  # === 电话号（西班牙常见格式）===
+  - name: phone
+    type: regex
+    category: contact
+    enabled: true
+    patterns:
+      - "\\b(\\+34\\s?)?(6|7|8|9)\\d{8}\\b"
+    replacement: "600000000"
+
+  # === 邮箱 ===
+  - name: email
+    type: regex
+    category: contact
+    enabled: true
+    patterns:
+      - "\\b[\\w\\.-]+@[\\w\\.-]+\\.[A-Za-z]{2,}\\b"
+    replacement: "correo@ejemplo.es"
+
+  # === 地址（非常简化，只做示例）===
+  - name: address
+    type: regex
+    category: address
+    enabled: true
+    patterns:
+      - "\\bCalle\\s+[A-ZÁÉÍÓÚÑa-záéíóúñ0-9\\s]+,?\\s*\\d{5}\\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+\\b"
+      - "\\bPlaça
