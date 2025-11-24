@@ -6,7 +6,6 @@ from watchdog.events import FileSystemEventHandler
 
 from handlers_docx import anonymize_docx
 from handlers_pdf import anonymize_pdf
-from config import load_rules
 
 
 INPUT_DIR = Path("input")
